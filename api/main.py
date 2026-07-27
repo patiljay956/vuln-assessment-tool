@@ -28,7 +28,8 @@ import json
 import os
 from sqlalchemy import text
 from db.database import get_db
-
+from db.models import Admin
+from db.scan_store import SessionLocal
 from api.models import (
     ScanRequest,
     ScanResponse,
@@ -115,7 +116,70 @@ def check_and_increment_scan_limit(user_id: str, email: str, daily_limit: int = 
         return True, 0  # fail open — don't block scan if DB has issues
     finally:
         db.close()
+# ──────────────────────────────────────────────
+# Admin helpers
+# ──────────────────────────────────────────────
 
+def require_admin(user_id: str):
+    """Raise 403 if user is not an admin."""
+    if not scan_store.is_admin(user_id):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+# ──────────────────────────────────────────────
+# Admin routes — Phase 1
+# ──────────────────────────────────────────────
+
+@app.get("/admin/check", tags=["Admin"])
+def check_admin(user_id: str):
+    """Check if a user has admin role."""
+    return {"is_admin": scan_store.is_admin(user_id)}
+
+
+@app.get("/admin/stats", tags=["Admin"])
+def get_admin_stats(user_id: str):
+    """Get platform-wide statistics. Admin only."""
+    require_admin(user_id)
+
+    db = SessionLocal()
+    try:
+        today = date.today().isoformat()
+
+        total_scans = db.execute(
+            text("SELECT COUNT(*) FROM scans")
+        ).scalar()
+
+        today_scans = db.execute(
+            text("SELECT COUNT(*) FROM scans WHERE DATE(created_at) = :today"),
+            {"today": today}
+        ).scalar()
+
+        completed = db.execute(
+            text("SELECT COUNT(*) FROM scans WHERE status = 'completed'")
+        ).scalar()
+
+        running = db.execute(
+            text("SELECT COUNT(*) FROM scans WHERE status = 'running'")
+        ).scalar()
+
+        failed = db.execute(
+            text("SELECT COUNT(*) FROM scans WHERE status = 'failed'")
+        ).scalar()
+
+        total_users = db.execute(
+            text("SELECT COUNT(DISTINCT user_id) FROM scans WHERE user_id IS NOT NULL")
+        ).scalar()
+
+        return {
+            "total_scans":     int(total_scans or 0),
+            "today_scans":     int(today_scans or 0),
+            "completed_scans": int(completed or 0),
+            "running_scans":   int(running or 0),
+            "failed_scans":    int(failed or 0),
+            "total_users":     int(total_users or 0),
+        }
+    finally:
+        db.close()
 # ──────────────────────────────────────────────
 # Routes
 # ──────────────────────────────────────────────

@@ -140,5 +140,17 @@ class PostgresScanStore:
         finally:
             db.close()
 
+    def is_admin(self, user_id: str) -> bool:
+        """Check if user_id belongs to an admin."""
+        db = SessionLocal()
+        try:
+            from db.models import Admin
+            result = db.query(Admin).filter(Admin.user_id == user_id).first()
+            return result is not None
+        except Exception as e:
+            logger.error(f"Admin check failed: {e}")
+            return False
+        finally:
+            db.close()
 
 scan_store = PostgresScanStore()

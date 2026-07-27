@@ -5,11 +5,13 @@ Request and response schemas for the vulnerability assessment API.
 FastAPI uses these for automatic validation and OpenAPI docs generation.
 """
 
+import uuid
+
 from pydantic import BaseModel, HttpUrl
 from typing import Optional, List
 from enum import Enum
-
-
+import datetime
+from sqlalchemy import Column, String
 class ScanStatus(str, Enum):
     QUEUED    = "queued"
     RUNNING   = "running"
@@ -105,3 +107,11 @@ class ScanListResponse(BaseModel):
     """Returned when listing all scans."""
     scans: List[dict]
     total: int
+
+class Admin(BaseModel):
+    __tablename__ = "admins"
+
+    id         = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id    = Column(String, nullable=False, unique=True)
+    email      = Column(String, nullable=False, unique=True)
+    created_at = Column(String, default=lambda: datetime.datetime.utcnow().isoformat())
