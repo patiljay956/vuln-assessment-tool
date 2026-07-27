@@ -180,6 +180,166 @@ def get_admin_stats(user_id: str):
         }
     finally:
         db.close()
+
+@app.get("/admin/users", tags=["Admin"])
+def get_admin_users(user_id: str):
+    require_admin(user_id)
+    db = SessionLocal()
+    try:
+        today = date.today().isoformat()
+        rows = db.execute(text("""
+            SELECT
+                user_email,
+                user_id,
+                COUNT(*) AS total_scans,
+                COUNT(*) FILTER (WHERE DATE(created_at) = :today) AS scans_today,
+                MIN(created_at) AS joined_at
+            FROM scans
+            WHERE user_id IS NOT NULL
+            GROUP BY user_email, user_id
+            ORDER BY joined_at DESC
+        """), {"today": today}).fetchall()
+
+        users = []
+        for row in rows:
+            is_admin_user = scan_store.is_admin(row[1])
+            limit_row = db.execute(text("""
+                SELECT daily_limit FROM user_scan_limits
+                WHERE user_id = :uid AND scan_date = :today
+            """), {"uid": row[1], "today": today}).fetchone()
+            users.append({
+                "email":            row[0],
+                "user_id":          row[1],
+                "total_scans":      int(row[2]),
+                "scans_today":      int(row[3]),
+                "joined_at":        str(row[4]),
+                "role":             "admin" if is_admin_user else "user",
+                "scanning_disabled": limit_row[0] == 0 if limit_row else False,
+            })
+        return {"users": users, "total": len(users)}
+    finally:
+        db.close()
+
+
+@app.get("/admin/scans", tags=["Admin"])
+def get_admin_scans(user_id: str, limit: int = 50, offset: int = 0):
+    require_admin(user_id)
+    db = SessionLocal()
+    try:
+        from db.models import Scan as ScanModel
+        scans = db.query(ScanModel).order_by(
+            ScanModel.created_at.desc()
+        ).offset(offset).limit(limit).all()
+        total = db.query(ScanModel).count()
+        return {
+            "scans": [
+                {
+                    "scan_id":      s.scan_id,
+                    "url":          s.url,
+                    "user_email":   s.user_email,
+                    "user_id":      s.user_id,
+                    "status":       s.status,
+                    "created_at":   s.created_at,
+                    "completed_at": s.completed_at,
+                    "summary":      s.summary or {},
+                    "error":        s.error,
+                }
+                for s in scans
+            ],
+            "total": total,
+        }
+    finally:
+        db.close()
+
+
+@app.post("/admin/users/{target_user_id}/disable-scanning", tags=["Admin"])
+def disable_user_scanning(target_user_id: str, user_id: str):
+    require_admin(user_id)
+    db = SessionLocal()
+    try:
+        today = date.today()
+        db.execute(text("""
+            INSERT INTO user_scan_limits (user_id, email, scan_date, scan_count, daily_limit)
+            VALUES (:uid, '', :today, 0, 0)
+            ON CONFLICT (user_id, scan_date)
+            DO UPDATE SET daily_limit = 0
+        """), {"uid": target_user_id, "today": today})
+        db.commit()
+        return {"message": f"Scanning disabled for user {target_user_id}"}
+    finally:
+        db.close()
+
+
+@app.post("/admin/users/{target_user_id}/enable-scanning", tags=["Admin"])
+def enable_user_scanning(target_user_id: str, user_id: str):
+    require_admin(user_id)
+    db = SessionLocal()
+    try:
+        today = date.today()
+        db.execute(text("""
+            INSERT INTO user_scan_limits (user_id, email, scan_date, scan_count, daily_limit)
+            VALUES (:uid, '', :today, 0, 3)
+            ON CONFLICT (user_id, scan_date)
+            DO UPDATE SET daily_limit = 3
+        """), {"uid": target_user_id, "today": today})
+        db.commit()
+        return {"message": f"Scanning enabled for user {target_user_id}"}
+    finally:
+        db.close()
+
+
+@app.post("/admin/users/{target_user_id}/reset-limit", tags=["Admin"])
+def reset_user_limit(target_user_id: str, user_id: str):
+    require_admin(user_id)
+    db = SessionLocal()
+    try:
+        today = date.today()
+        db.execute(text("""
+            UPDATE user_scan_limits
+            SET scan_count = 0
+            WHERE user_id = :uid AND scan_date = :today
+        """), {"uid": target_user_id, "today": today})
+        db.commit()
+        return {"message": f"Scan limit reset for user {target_user_id}"}
+    finally:
+        db.close()
+
+
+@app.get("/admin/health", tags=["Admin"])
+def get_system_health(user_id: str):
+    require_admin(user_id)
+    health = {}
+    health["fastapi"] = {"status": "healthy"}
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        health["postgresql"] = {"status": "healthy"}
+    except Exception as e:
+        health["postgresql"] = {"status": "unhealthy", "error": str(e)}
+    try:
+        import redis as redis_lib
+        r = redis_lib.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+        r.ping()
+        health["redis"] = {"status": "healthy"}
+    except Exception as e:
+        health["redis"] = {"status": "unhealthy", "error": str(e)}
+    try:
+        import requests as req
+        resp = req.get(
+            f"{os.getenv('ZAP_URL', 'http://localhost:8080')}/JSON/core/view/version/",
+            timeout=5
+        )
+        health["zap"] = {"status": "healthy", "version": resp.json().get("version")}
+    except Exception as e:
+        health["zap"] = {"status": "unhealthy", "error": str(e)}
+    try:
+        from api.celery_app import celery_app
+        i = celery_app.control.inspect(timeout=3)
+        health["celery"] = {"status": "healthy" if i.active() is not None else "unhealthy"}
+    except Exception as e:
+        health["celery"] = {"status": "unhealthy", "error": str(e)}
+    return health
 # ──────────────────────────────────────────────
 # Routes
 # ──────────────────────────────────────────────

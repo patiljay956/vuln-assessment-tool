@@ -5,13 +5,9 @@ Request and response schemas for the vulnerability assessment API.
 FastAPI uses these for automatic validation and OpenAPI docs generation.
 """
 
-import uuid
-
 from pydantic import BaseModel, HttpUrl
 from typing import Optional, List
 from enum import Enum
-import datetime
-from sqlalchemy import Column, String
 class ScanStatus(str, Enum):
     QUEUED    = "queued"
     RUNNING   = "running"
