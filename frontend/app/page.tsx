@@ -1,6 +1,7 @@
 "use client";
 export const dynamic = "force-dynamic";
 import { supabase } from "@/lib/supabase";
+import { checkAdmin } from "@/lib/adminApi";
 import { useRouter } from "next/navigation";
 import { useState, useEffect, useCallback } from "react";
 import {
@@ -340,6 +341,7 @@ function ScanHistory({ scans, onSelect }: { scans: Scan[]; onSelect: (s: Scan) =
 export default function Home() {
   const router = useRouter();
   const [user, setUser] = useState<{ id: string; email: string } | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [limits, setLimits] = useState({ scans_remaining: 3, daily_limit: 3 })
   const [url, setUrl]                 = useState("");
   const [loading, setLoading]         = useState(false);
@@ -386,6 +388,7 @@ export default function Home() {
       return;
     }
     setUser({ id: session.user.id, email: session.user.email! });
+    checkAdmin(session.user.id).then((r) => setIsAdmin(r.is_admin)).catch(() => {});
   });
 
   const { data: { subscription } } = supabase.auth.onAuthStateChange(
@@ -394,6 +397,7 @@ export default function Home() {
         router.push("/auth");
       } else {
         setUser({ id: session.user.id, email: session.user.email! });
+        checkAdmin(session.user.id).then((r) => setIsAdmin(r.is_admin)).catch(() => {});
       }
     }
   );
@@ -490,6 +494,14 @@ export default function Home() {
               >
                 Sign Out
               </button>
+              {isAdmin && (
+                <button
+                  onClick={() => router.push("/admin")}
+                  className="text-xs bg-indigo-700 hover:bg-indigo-600 text-white px-3 py-1.5 rounded-lg transition-colors"
+                >
+                  Admin
+                </button>
+              )}
             </div>
           )}
         </div>
