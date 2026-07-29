@@ -422,6 +422,16 @@ def create_scan(request: ScanRequest ):
     from api.celery_tasks import run_scan_celery
     run_scan_celery.delay(scan_id, target_url)
 
+    from services.audit_logger import audit_logger
+    audit_logger.log_event(
+        event_type="SCAN_CREATED",
+        performed_by=user_id,
+        entity_type="scan",
+        entity_id=scan_id,
+        action=f"Scan created for {target_url}",
+        metadata={"url": target_url},
+    )
+
     return ScanResponse(
         scan_id=scan_id,
         url=target_url,
@@ -429,15 +439,6 @@ def create_scan(request: ScanRequest ):
         message=f"Scan queued. Poll GET /scans/{scan_id} for status and results.",
     )
 
-    from services.audit_logger import audit_logger
-    audit_logger.log_event(
-    event_type="SCAN_CREATED",
-        performed_by=user_id,
-        entity_type="scan",
-        entity_id=scan_id,
-        action=f"Scan created for {target_url}",
-        metadata={"url": target_url},
-    )
 
 @app.get("/scans/{scan_id}", response_model=ScanStatusResponse, tags=["Scans"])
 def get_scan(scan_id: str, user_id: Optional[str] = None):
