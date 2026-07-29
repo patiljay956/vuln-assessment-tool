@@ -70,7 +70,7 @@ class AuditLog(Base):
     entity_type  = Column(String, nullable=True)
     entity_id    = Column(String, nullable=True)
     action       = Column(String, nullable=True)
-    metadata     = Column(JSON, nullable=True)
+    event_metadata   = Column(JSON, nullable=True)
     ip_address   = Column(String, nullable=True)
 
 

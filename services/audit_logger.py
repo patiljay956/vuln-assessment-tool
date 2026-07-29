@@ -50,7 +50,7 @@ class AuditLogger:
                     entity_type=entity_type,
                     entity_id=entity_id,
                     action=action,
-                    metadata=metadata or {},
+                    event_metadata=metadata or {},
                     ip_address=ip_address,
                 )
                 db.add(log)
