@@ -71,4 +71,22 @@ def run_scan_celery(self, scan_id: str, target_url: str):
             "completed_at": datetime.utcnow().isoformat(),
             "error":        str(e),
         })
+        try:
+            from services.audit_logger import audit_logger
+            audit_logger.log_event(
+                event_type="SCAN_COMPLETED",
+                performed_by=None,
+                entity_type="scan",
+                entity_id=scan_id,
+                action=f"Scan completed for {target_url}",
+                metadata={
+                    "total": summary.get("total", 0),
+                    "critical": summary.get("critical", 0),
+                    "high": summary.get("high", 0),
+                    "medium": summary.get("medium", 0),
+                    "low": summary.get("low", 0),
+                },
+            )
+        except Exception:
+            pass
         raise

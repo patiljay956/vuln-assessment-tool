@@ -30,6 +30,8 @@ from sqlalchemy import text
 from db.database import get_db
 from db.models import Admin
 from db.scan_store import SessionLocal
+from middleware.logging_middleware import RequestLoggingMiddleware
+from handlers.exception_handler import global_exception_handler
 from api.models import (
     ScanRequest,
     ScanResponse,
@@ -40,6 +42,8 @@ from api.models import (
 from api.tasks import run_scan_task
 from db.scan_store import scan_store
 import logging
+
+from services import audit_logger
 logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────
 # App setup
@@ -50,7 +54,10 @@ app = FastAPI(
     description="Submit a URL and get a full vulnerability report powered by OWASP ZAP and AI analysis.",
     version="0.1.0",
 )
+
 from db.database import init_db
+app.add_middleware(RequestLoggingMiddleware)
+app.add_exception_handler(Exception, global_exception_handler)
 
 @app.on_event("startup")
 def startup_event():
@@ -133,8 +140,18 @@ def require_admin(user_id: str):
 @app.get("/admin/check", tags=["Admin"])
 def check_admin(user_id: str):
     """Check if a user has admin role."""
-    return {"is_admin": scan_store.is_admin(user_id)}
 
+    is_admin = scan_store.is_admin(user_id)
+
+    if is_admin:
+        audit_logger.log_event(
+            event_type="ADMIN_LOGIN",
+            performed_by=user_id,
+            entity_type="admin",
+            action="Admin panel accessed",
+        )
+
+    return {"is_admin": is_admin}
 
 @app.get("/admin/stats", tags=["Admin"])
 def get_admin_stats(user_id: str):
@@ -412,6 +429,15 @@ def create_scan(request: ScanRequest ):
         message=f"Scan queued. Poll GET /scans/{scan_id} for status and results.",
     )
 
+    from services.audit_logger import audit_logger
+    audit_logger.log_event(
+    event_type="SCAN_CREATED",
+        performed_by=user_id,
+        entity_type="scan",
+        entity_id=scan_id,
+        action=f"Scan created for {target_url}",
+        metadata={"url": target_url},
+    )
 
 @app.get("/scans/{scan_id}", response_model=ScanStatusResponse, tags=["Scans"])
 def get_scan(scan_id: str, user_id: Optional[str] = None):
@@ -495,6 +521,14 @@ def download_pdf(scan_id: str):
         raise HTTPException(status_code=400, detail="Scan not completed yet")
     generator = PDFGenerator()
     path = generator.generate(scan, output_filename=f"report_{scan_id}.pdf")
+    audit_logger.log_event(
+        event_type="REPORT_DOWNLOADED",
+        performed_by=scan.get("user_id"),
+        entity_type="scan",
+        entity_id=scan_id,
+        action=f"PDF report downloaded for {scan.get('url')}",
+        metadata={"format": "pdf", "url": scan.get("url")},
+        )
     return FileResponse(path, media_type="application/pdf", filename=f"report_{scan_id}.pdf")
 
 @app.get("/scans/{scan_id}/report/excel", tags=["Reports"])
@@ -506,6 +540,15 @@ def download_excel(scan_id: str):
         raise HTTPException(status_code=400, detail="Scan not completed yet")
     generator = ExcelGenerator()
     path = generator.generate(scan, output_filename=f"report_{scan_id}.xlsx")
+    audit_logger.log_event(
+        event_type="REPORT_DOWNLOADED",
+        performed_by=scan.get("user_id"),
+        entity_type="scan",
+        entity_id=scan_id,
+        action=f"Excel report downloaded for {scan.get('url')}",
+        metadata={"format": "xlsx", "url": scan.get("url")},
+        )
+
     return FileResponse(path, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=f"report_{scan_id}.xlsx")
 
 @app.get("/limits/{user_id}", tags=["Limits"])
