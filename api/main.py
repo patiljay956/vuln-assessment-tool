@@ -44,6 +44,7 @@ from db.scan_store import scan_store
 import logging
 
 from services import audit_logger
+from services.audit_logger import audit_logger
 logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────
 # App setup
@@ -422,7 +423,6 @@ def create_scan(request: ScanRequest ):
     from api.celery_tasks import run_scan_celery
     run_scan_celery.delay(scan_id, target_url)
 
-    from services.audit_logger import audit_logger
     audit_logger.log_event(
         event_type="SCAN_CREATED",
         performed_by=user_id,
@@ -572,6 +572,96 @@ def get_user_limits(user_id: str):
             "scans_used":      row[0],
             "daily_limit":     row[1],
             "scans_remaining": max(0, row[1] - row[0]),
+        }
+    finally:
+        db.close()
+
+@app.get("/admin/logs/api", tags=["Admin"])
+def get_api_logs(user_id: str, limit: int = 100):
+    require_admin(user_id)
+    db = SessionLocal()
+    try:
+        from db.models import ApiLog
+        logs = db.query(ApiLog).order_by(
+            ApiLog.timestamp.desc()
+        ).limit(limit).all()
+        return {
+            "logs": [
+                {
+                    "id":                l.id,
+                    "request_id":        l.request_id,
+                    "timestamp":         l.timestamp,
+                    "method":            l.method,
+                    "endpoint":          l.endpoint,
+                    "user_id":           l.user_id,
+                    "ip_address":        l.ip_address,
+                    "response_status":   l.response_status,
+                    "execution_time_ms": l.execution_time_ms,
+                    "success":           l.success,
+                    "error_message":     l.error_message,
+                }
+                for l in logs
+            ],
+            "total": db.query(ApiLog).count(),
+        }
+    finally:
+        db.close()
+
+
+@app.get("/admin/logs/audit", tags=["Admin"])
+def get_audit_logs(user_id: str, limit: int = 100):
+    require_admin(user_id)
+    db = SessionLocal()
+    try:
+        from db.models import AuditLog
+        logs = db.query(AuditLog).order_by(
+            AuditLog.timestamp.desc()
+        ).limit(limit).all()
+        return {
+            "logs": [
+                {
+                    "id":             l.id,
+                    "timestamp":      l.timestamp,
+                    "event_type":     l.event_type,
+                    "performed_by":   l.performed_by,
+                    "entity_type":    l.entity_type,
+                    "entity_id":      l.entity_id,
+                    "action":         l.action,
+                    "event_metadata": l.event_metadata,
+                    "ip_address":     l.ip_address,
+                }
+                for l in logs
+            ],
+            "total": db.query(AuditLog).count(),
+        }
+    finally:
+        db.close()
+
+
+@app.get("/admin/logs/errors", tags=["Admin"])
+def get_error_logs(user_id: str, limit: int = 50):
+    require_admin(user_id)
+    db = SessionLocal()
+    try:
+        from db.models import ErrorLog
+        logs = db.query(ErrorLog).order_by(
+            ErrorLog.timestamp.desc()
+        ).limit(limit).all()
+        return {
+            "logs": [
+                {
+                    "id":                l.id,
+                    "timestamp":         l.timestamp,
+                    "request_id":        l.request_id,
+                    "endpoint":          l.endpoint,
+                    "exception_type":    l.exception_type,
+                    "exception_message": l.exception_message,
+                    "user_id":           l.user_id,
+                    "ip_address":        l.ip_address,
+                }
+                for l in logs
+            ],
+            "total": db.query(ErrorLog).count(),
         }
     finally:
         db.close()

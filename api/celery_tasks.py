@@ -8,7 +8,7 @@ import logging
 from datetime import datetime
 from api.celery_app import celery_app
 from api.models import ScanStatus
-
+from services.audit_logger import audit_logger
 logger = logging.getLogger(__name__)
 
 
@@ -72,7 +72,6 @@ def run_scan_celery(self, scan_id: str, target_url: str):
             "error":        str(e),
         })
         try:
-            from services.audit_logger import audit_logger
             audit_logger.log_event(
                 event_type="SCAN_COMPLETED",
                 performed_by=None,
