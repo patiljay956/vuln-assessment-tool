@@ -59,7 +59,7 @@ class PDFGenerator:
 
     def _chapter_header(self, number: str, title: str, subtitle: str = "") -> str:
         return f"""
-        <table style="width:100%; border-collapse:collapse; margin:20px 0 12px 0; page-break-before:always;">
+        <table style="width:100%; border-collapse:collapse; margin:8px 0 6px 0;">
             <tr>
                 <td style="background:#1a1a2e; color:#A8C6FA; padding:6px 12px; font-size:11px; font-weight:700; width:60px;">
                     CHAPTER {number}
@@ -82,7 +82,7 @@ class PDFGenerator:
         row_bg = "#FAFAFA" if index % 2 == 0 else "#FFFFFF"
 
         return f"""
-        <table style="width:100%; border-collapse:collapse; margin-bottom:8px; background:{row_bg}; border:1px solid #E8E8E8;">
+        <table style="width:100%; border-collapse:collapse; margin-bottom:4px; background:{row_bg}; border:1px solid #E8E8E8;">
             <tr>
                 <td style="background:{bg_color}; border-left:4px solid {text_color}; padding:8px 12px; width:90px; vertical-align:top;">
                     <div style="color:{text_color}; font-weight:700; font-size:10px;">{sev.upper()}</div>
@@ -235,7 +235,7 @@ class PDFGenerator:
 <!-- ═══════════════════════════════════════════ -->
 <!-- COVER PAGE                                  -->
 <!-- ═══════════════════════════════════════════ -->
-<table style="width:100%; background:#1a1a2e; page-break-after:always;">
+<table style="width:100%; background:#1a1a2e; page-break-after:always; margin-bottom:0;">
     <tr>
         <td style="padding:60px 50px; color:white;">
             <!-- Top bar -->
@@ -315,7 +315,7 @@ class PDFGenerator:
 <!-- ═══════════════════════════════════════════ -->
 <!-- EXECUTIVE SUMMARY                           -->
 <!-- ═══════════════════════════════════════════ -->
-<div style="padding:30px 40px; page-break-after:always;">
+<div style="padding:16px 40px;">
     <table style="width:100%; border-collapse:collapse; margin-bottom:16px;">
         <tr>
             <td style="background:#1a1a2e; color:#A8C6FA; padding:5px 12px; font-size:10px; font-weight:700; width:180px;">EXECUTIVE SUMMARY</td>
@@ -323,7 +323,7 @@ class PDFGenerator:
         </tr>
     </table>
 
-    <p style="font-size:12px; color:#444; line-height:1.8; margin-bottom:20px; padding:16px; background:#F8F9FA; border-left:4px solid #1a1a2e;">
+    <p style="font-size:11px; color:#444; line-height:1.6; margin-bottom:20px; padding:16px; background:#F8F9FA; border-left:4px solid #1a1a2e;">
         {exec_summary}
     </p>
 
@@ -378,7 +378,7 @@ class PDFGenerator:
 <!-- ═══════════════════════════════════════════ -->
 <!-- CHAPTER 1: CRITICAL & HIGH                  -->
 <!-- ═══════════════════════════════════════════ -->
-<div style="padding:20px 40px;">
+<div style="padding:8px 40px;">
     {self._chapter_header("1", "Critical &amp; High Priority Vulnerabilities",
         "The following vulnerabilities represent the highest risk to your organization and should be addressed immediately. "
         "These findings have been confirmed by automated scanning engines and enriched with AI-generated remediation guidance.")}
@@ -388,7 +388,7 @@ class PDFGenerator:
 <!-- ═══════════════════════════════════════════ -->
 <!-- CHAPTER 2: MEDIUM                           -->
 <!-- ═══════════════════════════════════════════ -->
-<div style="padding:20px 40px;">
+<div style="padding:8px 40px;">
     {self._chapter_header("2", "Medium Severity Vulnerabilities",
         "Medium severity findings represent meaningful security weaknesses that should be addressed in the next development cycle. "
         "While not immediately exploitable in most cases, these issues can be chained with other vulnerabilities to enable attacks.")}
@@ -398,7 +398,7 @@ class PDFGenerator:
 <!-- ═══════════════════════════════════════════ -->
 <!-- CHAPTER 3: LOW                              -->
 <!-- ═══════════════════════════════════════════ -->
-<div style="padding:20px 40px;">
+<div style="padding:8px 40px;">
     {self._chapter_header("3", "Low Severity Vulnerabilities",
         "Low severity findings are security improvements that, while not immediately critical, represent security best practice gaps. "
         "These should be addressed as part of regular security hygiene and hardening activities.")}
@@ -408,7 +408,7 @@ class PDFGenerator:
 <!-- ═══════════════════════════════════════════ -->
 <!-- CHAPTER 4: CVE & TECH                       -->
 <!-- ═══════════════════════════════════════════ -->
-<div style="padding:20px 40px;">
+<div style="padding:8px 40px;">
     {self._chapter_header("4", "Technology &amp; CVE Findings",
         "The following findings were identified through technology fingerprinting and cross-referenced against the NVD (National Vulnerability Database). "
         "Known CVEs in detected software versions represent concrete, publicly documented exploitation paths.")}
@@ -418,7 +418,7 @@ class PDFGenerator:
 <!-- ═══════════════════════════════════════════ -->
 <!-- CHAPTER 5: REMEDIATION CHECKLIST            -->
 <!-- ═══════════════════════════════════════════ -->
-<div style="padding:20px 40px;">
+<div style="padding:8px 40px;">
     {self._chapter_header("5", "Remediation Checklist",
         "Use this checklist to track remediation progress. Items are ordered by severity — address Critical and High findings first. "
         "Check off each item as it is resolved and re-scan to verify.")}
@@ -441,7 +441,7 @@ class PDFGenerator:
 <!-- ═══════════════════════════════════════════ -->
 <!-- APPENDIX: METHODOLOGY                       -->
 <!-- ═══════════════════════════════════════════ -->
-<div style="padding:20px 40px; page-break-before:always;">
+<div style="padding:8px 40px;">
     <table style="width:100%; border-collapse:collapse; margin-bottom:16px;">
         <tr>
             <td style="background:#2C3E50; color:#BDC3C7; padding:5px 12px; font-size:10px; font-weight:700; width:100px;">APPENDIX</td>
