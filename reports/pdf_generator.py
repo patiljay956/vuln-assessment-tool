@@ -114,6 +114,65 @@ class PDFGenerator:
             </tr>
         </table>"""
 
+    def _tls_summary_block(self, tls_grade: str, tls_details: dict) -> str:
+        """
+        Render a small TLS/SSL configuration summary box: overall letter
+        grade plus the certificate/negotiation details produced by the
+        SSL scanner's _extract_cert_details(). Returns "" if there's
+        nothing to show, so callers can embed it unconditionally.
+        """
+        if not tls_grade:
+            return ""
+
+        text_color, bg_color = TLS_GRADE_COLORS.get(tls_grade, ("#333", "#eee"))
+        tls_details = tls_details or {}
+
+        issuer  = tls_details.get("issuer") or {}
+        subject = tls_details.get("subject") or {}
+        issuer_cn  = issuer.get("commonName", "N/A") if isinstance(issuer, dict) else "N/A"
+        subject_cn = subject.get("commonName", "N/A") if isinstance(subject, dict) else "N/A"
+        protocol = tls_details.get("negotiated_protocol") or "N/A"
+        cipher   = tls_details.get("negotiated_cipher") or "N/A"
+        not_before = tls_details.get("not_before") or "N/A"
+        not_after  = tls_details.get("not_after") or "N/A"
+
+        return f"""
+        <table style="width:100%; border-collapse:collapse; margin-bottom:12px; border:1px solid #E8E8E8;">
+            <tr>
+                <td style="background:{bg_color}; border-left:4px solid {text_color}; padding:10px 14px; width:90px; vertical-align:middle; text-align:center;">
+                    <div style="color:{text_color}; font-weight:700; font-size:9px; letter-spacing:1px;">TLS GRADE</div>
+                    <div style="color:{text_color}; font-weight:700; font-size:26px; line-height:1.2;">{tls_grade}</div>
+                </td>
+                <td style="padding:10px 14px; vertical-align:top;">
+                    <div style="font-weight:700; font-size:12px; color:#1a1a2e; margin-bottom:6px;">
+                        SSL/TLS Configuration Summary
+                    </div>
+                    <table style="width:100%; border-collapse:collapse;">
+                        <tr>
+                            <td style="font-size:10px; color:#666; padding:2px 8px 2px 0; width:110px;">Certificate Subject</td>
+                            <td style="font-size:10px; color:#333;">{subject_cn}</td>
+                        </tr>
+                        <tr>
+                            <td style="font-size:10px; color:#666; padding:2px 8px 2px 0;">Certificate Issuer</td>
+                            <td style="font-size:10px; color:#333;">{issuer_cn}</td>
+                        </tr>
+                        <tr>
+                            <td style="font-size:10px; color:#666; padding:2px 8px 2px 0;">Valid Period</td>
+                            <td style="font-size:10px; color:#333;">{not_before} &ndash; {not_after}</td>
+                        </tr>
+                        <tr>
+                            <td style="font-size:10px; color:#666; padding:2px 8px 2px 0;">Negotiated Protocol</td>
+                            <td style="font-size:10px; color:#333;">{protocol}</td>
+                        </tr>
+                        <tr>
+                            <td style="font-size:10px; color:#666; padding:2px 8px 2px 0;">Negotiated Cipher</td>
+                            <td style="font-size:10px; color:#333;">{cipher}</td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+        </table>"""
+
     def _build_html(self, scan_data: dict) -> str:
         scan_id      = scan_data.get("scan_id", "N/A")
         target_url   = scan_data.get("url") or scan_data.get("target", "N/A")
@@ -121,6 +180,12 @@ class PDFGenerator:
         summary      = scan_data.get("summary", {})
         exec_summary = scan_data.get("executive_summary", "No executive summary available.")
         findings     = scan_data.get("findings", [])
+
+        # SSL/TLS grade + cert details, from the SSL scanner's result dict.
+        # Checks top-level first (single-module result passed directly) and
+        # falls back to a nested "ssl_scan" key (aggregated multi-module result).
+        tls_grade   = scan_data.get("tls_grade") or scan_data.get("ssl_scan", {}).get("tls_grade")
+        tls_details = scan_data.get("tls_details") or scan_data.get("ssl_scan", {}).get("tls_details", {})
 
         try:
             date_str = datetime.fromisoformat(created_at).strftime("%B %d, %Y %H:%M UTC")
@@ -421,6 +486,7 @@ class PDFGenerator:
     {self._chapter_header("4", "Technology &amp; CVE Findings",
         "The following findings were identified through technology fingerprinting and cross-referenced against the NVD (National Vulnerability Database). "
         "Known CVEs in detected software versions represent concrete, publicly documented exploitation paths.")}
+    {self._tls_summary_block(tls_grade, tls_details)}
     {ch4_content}
 </div>
 
