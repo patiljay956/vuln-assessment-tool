@@ -1,583 +1,569 @@
 """
-PDF Report Generator — Tenable-Style Format
-============================================
-Generates a professional vulnerability assessment PDF report
-inspired by Tenable's Vulnerability Management Program Health report format.
+SSL/TLS Scanner Module
+======================
+Passive scanner — checks SSL/TLS configuration without sending attack payloads.
 
-Structure:
-    Page 1:  Cover page
-    Page 2:  Executive Summary + Risk Overview
-    Chapter 1: Critical & High Priority Vulnerabilities
-    Chapter 2: Medium Severity Vulnerabilities
-    Chapter 3: Low Severity Vulnerabilities
-    Chapter 4: Technology & CVE Findings
-    Chapter 5: Remediation Checklist
-    Appendix:  Scan Metadata & Methodology
+Checks for:
+    - Certificate validity and expiry
+    - Weak protocol versions (SSLv2, SSLv3, TLS 1.0, TLS 1.1)
+    - Self-signed certificates
+    - Hostname mismatch
+    - HSTS header presence
+    - Certificate chain issues
 
-Install:
-    pip install xhtml2pdf jinja2
+Usage:
+    from scanner.modules.ssl_scanner import SSLScanner
+    scanner = SSLScanner()
+    result = scanner.run_scan("https://example.com")
 """
 
-import os
-import json
+import uuid
+import ssl
+import socket
 import logging
-from datetime import datetime
-from pathlib import Path
+import requests
+from datetime import datetime, timezone
+from urllib.parse import urlparse
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [SSL] %(message)s")
 logger = logging.getLogger(__name__)
 
-SEVERITY_COLORS = {
-    "Critical":      ("#7B0000", "#FFE5E5"),
-    "High":          ("#C0392B", "#FDECEA"),
-    "Medium":        ("#E67E22", "#FEF3E2"),
-    "Low":           ("#2980B9", "#EBF5FB"),
-    "Informational": ("#7F8C8D", "#F2F3F4"),
-}
 
-OWASP_SHORT = {
-    "A01:2021 - Broken Access Control":                      "A01 - Broken Access Control",
-    "A02:2021 - Cryptographic Failures":                     "A02 - Cryptographic Failures",
-    "A03:2021 - Injection":                                  "A03 - Injection",
-    "A04:2021 - Insecure Design":                            "A04 - Insecure Design",
-    "A05:2021 - Security Misconfiguration":                  "A05 - Security Misconfiguration",
-    "A06:2021 - Vulnerable and Outdated Components":         "A06 - Vulnerable Components",
-    "A07:2021 - Identification and Authentication Failures": "A07 - Auth Failures",
-    "A08:2021 - Software and Data Integrity Failures":       "A08 - Integrity Failures",
-    "A09:2021 - Security Logging and Monitoring Failures":   "A09 - Logging Failures",
-    "A10:2021 - Server-Side Request Forgery":                "A10 - SSRF",
-}
+class SSLScanner:
+    """
+    Passive SSL/TLS configuration scanner.
 
+    Args:
+        timeout: Socket connection timeout in seconds
+    """
 
-class PDFGenerator:
-    def __init__(self, output_dir: str = "reports/output"):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, timeout: int = 10):
+        self.timeout = timeout
 
-    def _severity_badge(self, severity: str) -> str:
-        text_color, bg_color = SEVERITY_COLORS.get(severity, ("#333", "#eee"))
-        return f'<span style="background:{bg_color}; color:{text_color}; padding:2px 8px; font-weight:700; font-size:10px; border:1px solid {text_color};">{severity.upper()}</span>'
+    def _get_certificate_info(self, hostname: str, port: int = 443) -> dict:
+        """Fetch SSL certificate details from the target host."""
+        context = ssl.create_default_context()
+        try:
+            with socket.create_connection((hostname, port), timeout=self.timeout) as sock:
+                with context.wrap_socket(sock, server_hostname=hostname) as ssock:
+                    cert = ssock.getpeercert()
+                    protocol = ssock.version()
+                    cipher = ssock.cipher()
+                    return {
+                        "cert":     cert,
+                        "protocol": protocol,
+                        "cipher":   cipher,
+                        "error":    None,
+                    }
+        except ssl.SSLCertVerificationError as e:
+            return {"cert": None, "protocol": None, "cipher": None, "error": f"SSL verification failed: {e}"}
+        except ssl.SSLError as e:
+            return {"cert": None, "protocol": None, "cipher": None, "error": f"SSL error: {e}"}
+        except (socket.timeout, ConnectionRefusedError, OSError) as e:
+            return {"cert": None, "protocol": None, "cipher": None, "error": f"Connection failed: {e}"}
 
-    def _chapter_header(self, number: str, title: str, subtitle: str = "") -> str:
-        return f"""
-        <table style="width:100%; border-collapse:collapse; margin:8px 0 6px 0;">
-            <tr>
-                <td style="background:#1a1a2e; color:#A8C6FA; padding:6px 12px; font-size:11px; font-weight:700; width:60px;">
-                    CHAPTER {number}
-                </td>
-                <td style="background:#1a1a2e; color:#FFFFFF; padding:6px 16px; font-size:14px; font-weight:700;">
-                    {title}
-                </td>
-            </tr>
-        </table>
-        {"<p style='font-size:11px; color:#555; margin:0 0 12px 0; line-height:1.6;'>" + subtitle + "</p>" if subtitle else ""}
+    def _check_weak_protocols(self, hostname: str, port: int = 443) -> list:
+        """Test whether weak TLS protocol versions are accepted."""
+        weak_protocols = []
+        protocols_to_test = [
+            (ssl.PROTOCOL_TLS_CLIENT, "TLSv1"),
+            (ssl.PROTOCOL_TLS_CLIENT, "TLSv1.1"),
+        ]
+        for proto_const, proto_name in protocols_to_test:
+            try:
+                context = ssl.SSLContext(proto_const)
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                context.minimum_version = ssl.TLSVersion.TLSv1
+                context.maximum_version = ssl.TLSVersion.TLSv1 if "1.0" in proto_name else ssl.TLSVersion.TLSv1_1
+                with socket.create_connection((hostname, port), timeout=self.timeout) as sock:
+                    with context.wrap_socket(sock, server_hostname=hostname):
+                        weak_protocols.append(proto_name)
+                        logger.warning(f"Weak protocol accepted: {proto_name}")
+            except Exception:
+                pass
+        return weak_protocols
+
+    def _check_cipher_suites(self, hostname: str, port: int = 443) -> dict:
         """
+        Probe the server with restrictive OpenSSL cipher strings to see whether
+        it will negotiate a connection using a weak/legacy cipher family.
 
-    def _finding_block(self, finding: dict, index: int) -> str:
-        sev = finding.get("severity", "Low")
-        text_color, bg_color = SEVERITY_COLORS.get(sev, ("#333", "#eee"))
-        owasp = OWASP_SHORT.get(finding.get("owasp_category", ""), finding.get("owasp_category", ""))
-        recommendation = finding.get("recommendation") or finding.get("solution", "Review and remediate this finding.")
-        business_impact = finding.get("business_impact", "")
-        evidence = finding.get("evidence", "")
-        row_bg = "#FAFAFA" if index % 2 == 0 else "#FFFFFF"
+        Returns a dict of {cipher_family: bool_accepted}.
+        """
+        weak_cipher_families = {
+            "RC4":    "RC4",
+            "DES":    "DES-CBC3-SHA:DES-CBC-SHA",
+            "3DES":   "DES-CBC3-SHA",
+            "NULL":   "eNULL:aNULL",
+            "EXPORT": "EXPORT",
+        }
+        # Substring(s) expected in the negotiated cipher name for a hit to
+        # count as a genuine match — set_ciphers() only constrains TLS<=1.2
+        # suites (TLS 1.3 ciphersuites are negotiated independently), so we
+        # must both cap the handshake at TLSv1.2 AND verify what actually
+        # came back, or a TLS 1.3 connection falsely reads as "weak cipher accepted".
+        match_tokens = {
+            "RC4":    ("RC4",),
+            "DES":    ("DES-CBC-SHA",),
+            "3DES":   ("3DES", "DES-CBC3"),
+            "NULL":   ("NULL",),
+            "EXPORT": ("EXP-",),
+        }
 
-        return f"""
-        <table style="width:100%; border-collapse:collapse; margin-bottom:4px; background:{row_bg}; border:1px solid #E8E8E8;">
-            <tr>
-                <td style="background:{bg_color}; border-left:4px solid {text_color}; padding:8px 12px; width:90px; vertical-align:top;">
-                    <div style="color:{text_color}; font-weight:700; font-size:10px;">{sev.upper()}</div>
-                    <div style="color:{text_color}; font-weight:700; font-size:13px;">{finding.get("cvss_score", "N/A")}</div>
-                    <div style="color:{text_color}; font-size:9px;">CVSS</div>
-                </td>
-                <td style="padding:8px 12px; vertical-align:top;">
-                    <div style="font-weight:700; font-size:12px; color:#1a1a2e; margin-bottom:3px;">
-                        {finding.get("vuln_type", "Unknown")}
-                    </div>
-                    <div style="font-size:10px; color:#666; margin-bottom:4px;">
-                        {owasp} &nbsp;|&nbsp; {finding.get("affected_url", "N/A")[:80]}{"..." if len(finding.get("affected_url","")) > 80 else ""}
-                    </div>
-                    <div style="font-size:11px; color:#333; margin-bottom:4px;">
-                        <strong>Recommendation:</strong> {recommendation[:300]}{"..." if len(recommendation) > 300 else ""}
-                    </div>
-                    {f'<div style="font-size:10px; color:#555;"><strong>Business Impact:</strong> {business_impact}</div>' if business_impact else ""}
-                    {f'<div style="font-size:10px; color:#888; margin-top:3px;"><strong>Evidence:</strong> <code>{evidence[:120]}</code></div>' if evidence else ""}
-                </td>
-            </tr>
-        </table>"""
+        accepted = {}
+        for family, cipher_string in weak_cipher_families.items():
+            try:
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                # Cap at TLSv1.2 — the legacy cipher families being tested
+                # (RC4/DES/3DES/NULL/EXPORT) don't exist as TLS 1.3 suites,
+                # so leaving 1.3 enabled would let the handshake silently
+                # succeed on a modern cipher and produce a false positive.
+                context.minimum_version = ssl.TLSVersion.TLSv1
+                context.maximum_version = ssl.TLSVersion.TLSv1_2
+                # Lower the security level so legacy ciphers aren't blocked
+                # by OpenSSL's default policy before we even get to test them.
+                context.set_ciphers(f"{cipher_string}:@SECLEVEL=0")
+                with socket.create_connection((hostname, port), timeout=self.timeout) as sock:
+                    with context.wrap_socket(sock, server_hostname=hostname) as ssock:
+                        negotiated = ssock.cipher()
+                        negotiated_name = negotiated[0] if negotiated else ""
+                        is_match = any(tok in negotiated_name for tok in match_tokens[family])
+                        accepted[family] = is_match
+                        if is_match:
+                            logger.warning(f"Weak cipher family accepted: {family} ({negotiated_name})")
+            except (ssl.SSLError, OSError):
+                # Either OpenSSL refused to even offer the cipher string, or
+                # the server rejected the handshake — both mean "not weakly configured".
+                accepted[family] = False
+            except Exception:
+                accepted[family] = False
+        return accepted
 
-    def _build_html(self, scan_data: dict) -> str:
-        scan_id      = scan_data.get("scan_id", "N/A")
-        target_url   = scan_data.get("url") or scan_data.get("target", "N/A")
-        created_at   = scan_data.get("created_at", datetime.utcnow().isoformat())
-        summary      = scan_data.get("summary", {})
-        exec_summary = scan_data.get("executive_summary", "No executive summary available.")
-        findings     = scan_data.get("findings", [])
+    def _check_protocol_support(self, hostname: str, port: int = 443) -> dict:
+        """
+        Explicitly check whether the server supports the modern, recommended
+        TLS versions (1.2 and 1.3), independent of the weak-protocol probe.
 
-        try:
-            date_str = datetime.fromisoformat(created_at).strftime("%B %d, %Y %H:%M UTC")
-        except Exception:
-            date_str = created_at
+        Returns a dict of {"TLSv1.2": bool, "TLSv1.3": bool}.
+        """
+        support = {"TLSv1.2": False, "TLSv1.3": False}
+        version_map = {
+            "TLSv1.2": (ssl.TLSVersion.TLSv1_2, ssl.TLSVersion.TLSv1_2),
+            "TLSv1.3": (ssl.TLSVersion.TLSv1_3, ssl.TLSVersion.TLSv1_3),
+        }
+        for proto_name, (min_v, max_v) in version_map.items():
+            try:
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                context.minimum_version = min_v
+                context.maximum_version = max_v
+                with socket.create_connection((hostname, port), timeout=self.timeout) as sock:
+                    with context.wrap_socket(sock, server_hostname=hostname):
+                        support[proto_name] = True
+            except Exception:
+                support[proto_name] = False
+        return support
 
-        # Determine overall risk
-        if summary.get("critical", 0) > 0:
-            overall_risk, risk_color = "CRITICAL RISK", "#7B0000"
-        elif summary.get("high", 0) > 0:
-            overall_risk, risk_color = "HIGH RISK", "#C0392B"
-        elif summary.get("medium", 0) > 0:
-            overall_risk, risk_color = "MEDIUM RISK", "#E67E22"
+    def _extract_cert_details(self, cert: dict, protocol: str, cipher: tuple) -> dict:
+        """
+        Pull the human-readable issuer, subject, validity window, negotiated
+        protocol, and negotiated cipher out of the raw certificate dict
+        returned by ssl.SSLSocket.getpeercert().
+        """
+        def _flatten(name_field):
+            # name_field looks like (((‘countryName’, ‘US’),), ((‘organizationName’, ‘Foo’),), ...)
+            flat = {}
+            if not name_field:
+                return flat
+            for rdn in name_field:
+                for key, value in rdn:
+                    flat[key] = value
+            return flat
+
+        if not cert:
+            return {
+                "issuer": None, "subject": None,
+                "not_before": None, "not_after": None,
+                "negotiated_protocol": protocol, "negotiated_cipher": cipher[0] if cipher else None,
+            }
+
+        return {
+            "issuer":              _flatten(cert.get("issuer")),
+            "subject":             _flatten(cert.get("subject")),
+            "not_before":          cert.get("notBefore"),
+            "not_after":           cert.get("notAfter"),
+            "negotiated_protocol": protocol,
+            "negotiated_cipher":   cipher[0] if cipher else None,
+        }
+
+    def _calculate_tls_grade(
+        self,
+        cert_error: bool,
+        cert_expired: bool,
+        cert_expiring_soon: bool,
+        weak_protocols: list,
+        weak_ciphers: dict,
+        protocol_support: dict,
+        hsts_missing: bool,
+    ) -> str:
+        """
+        Derive an A-F letter grade from the individual check results.
+        This is a local heuristic, not the SSL Labs algorithm.
+        """
+        # Hard failures short-circuit straight to F
+        if cert_error or cert_expired:
+            return "F"
+
+        score = 100
+        if weak_protocols:
+            score -= 30 * len(weak_protocols)
+        if any(weak_ciphers.values()):
+            score -= 25
+        if not protocol_support.get("TLSv1.2") and not protocol_support.get("TLSv1.3"):
+            score -= 40  # server doesn't speak any modern TLS version
+        elif not protocol_support.get("TLSv1.3"):
+            score -= 5  # TLS 1.2 only — acceptable but not best practice
+        if cert_expiring_soon:
+            score -= 10
+        if hsts_missing:
+            score -= 10
+
+        score = max(score, 0)
+
+        if score >= 90:
+            return "A"
+        elif score >= 80:
+            return "B"
+        elif score >= 70:
+            return "C"
+        elif score >= 60:
+            return "D"
         else:
-            overall_risk, risk_color = "LOW RISK", "#2980B9"
+            return "F"
 
-        # Split findings by severity
-        critical_high = [f for f in findings if f.get("severity") in ("Critical", "High")]
-        medium        = [f for f in findings if f.get("severity") == "Medium"]
-        low           = [f for f in findings if f.get("severity") == "Low"]
-        cve_findings  = [f for f in findings if f.get("tool") in ("nvd_lookup", "nuclei")]
+    def _normalize_finding(
+        self,
+        scan_id: str,
+        vuln_type: str,
+        owasp_category: str,
+        cvss_score: float,
+        severity: str,
+        description: str,
+        solution: str,
+        affected_url: str,
+        evidence: str = "",
+        plugin_id: str = "",
+    ) -> dict:
+        """Build a normalized finding dict matching the standard schema."""
+        return {
+            "vuln_id":         str(uuid.uuid4()),
+            "scan_id":         scan_id,
+            "tool":            "ssl_scanner",
+            "plugin_id":       plugin_id or f"ssl_{vuln_type.lower().replace(' ', '_')}",
+            "vuln_type":       vuln_type,
+            "owasp_category":  owasp_category,
+            "cvss_score":      cvss_score,
+            "severity":        severity,
+            "confidence":      "High",
+            "evidence":        evidence,
+            "affected_url":    affected_url,
+            "method":          "GET",
+            "param":           "",
+            "attack":          "",
+            "description":     description,
+            "solution":        solution,
+            "cwe_id":          "326",
+            "recommendation":  solution,
+            "business_impact": "",
+        }
 
-        # OWASP distribution
-        owasp_counts = {}
-        for f in findings:
-            cat = OWASP_SHORT.get(f.get("owasp_category", ""), f.get("owasp_category", "Unknown"))
-            owasp_counts[cat] = owasp_counts.get(cat, 0) + 1
-        owasp_rows = ""
-        for cat, count in sorted(owasp_counts.items(), key=lambda x: -x[1])[:8]:
-            pct = int((count / max(summary.get("total", 1), 1)) * 100)
-            owasp_rows += f"""
-            <tr>
-                <td style="padding:5px 8px; font-size:11px; border-bottom:1px solid #ECF0F1;">{cat}</td>
-                <td style="padding:5px 8px; text-align:center; font-weight:700; font-size:11px; border-bottom:1px solid #ECF0F1;">{count}</td>
-                <td style="padding:5px 8px; border-bottom:1px solid #ECF0F1;">
-                    <div style="background:#3498DB; height:8px; width:{min(pct*2, 100)}%;"></div>
-                </td>
-            </tr>"""
+    def run_scan(self, target_url: str, scan_id: str = None) -> dict:
+        """
+        Run SSL/TLS security scan against the target URL.
 
-        # Chapter 1 — Critical & High
-        ch1_content = ""
-        if critical_high:
-            for i, f in enumerate(critical_high):
-                ch1_content += self._finding_block(f, i)
-        else:
-            ch1_content = '<p style="color:#27AE60; font-size:12px; padding:16px; background:#EAFAF1; border-left:4px solid #27AE60;">✓ No Critical or High severity vulnerabilities detected.</p>'
+        Args:
+            target_url: URL to scan (must be https:// for full SSL checks)
+            scan_id:    Optional parent scan ID
 
-        # Chapter 2 — Medium
-        ch2_content = ""
-        for i, f in enumerate(medium[:50]):  # cap at 50
-            ch2_content += self._finding_block(f, i)
-        if len(medium) > 50:
-            ch2_content += f'<p style="font-size:11px; color:#666; text-align:center; padding:8px;">... and {len(medium) - 50} more medium findings. See Excel export for complete list.</p>'
-        if not medium:
-            ch2_content = '<p style="color:#27AE60; font-size:12px; padding:16px; background:#EAFAF1; border-left:4px solid #27AE60;">✓ No Medium severity vulnerabilities detected.</p>'
+        Returns:
+            Standard result dict with findings and summary
+        """
+        if scan_id is None:
+            scan_id = str(uuid.uuid4())
 
-        # Chapter 3 — Low (summary table only, not full blocks)
-        low_rows = ""
-        for f in low[:30]:
-            owasp = OWASP_SHORT.get(f.get("owasp_category", ""), f.get("owasp_category", ""))
-            low_rows += f"""
-            <tr>
-                <td style="padding:6px 8px; font-size:11px; border-bottom:1px solid #ECF0F1;">{f.get("vuln_type","")[:60]}</td>
-                <td style="padding:6px 8px; font-size:11px; border-bottom:1px solid #ECF0F1; color:#2980B9;">{f.get("cvss_score","")}</td>
-                <td style="padding:6px 8px; font-size:10px; color:#666; border-bottom:1px solid #ECF0F1;">{owasp}</td>
-                <td style="padding:6px 8px; font-size:10px; color:#888; border-bottom:1px solid #ECF0F1;">{f.get("affected_url","")[:50]}{"..." if len(f.get("affected_url","")) > 50 else ""}</td>
-            </tr>"""
-        if len(low) > 30:
-            low_rows += f'<tr><td colspan="4" style="padding:8px; font-size:11px; color:#666; text-align:center;">... and {len(low)-30} more low findings in Excel export.</td></tr>'
+        logger.info(f"=== Starting SSL scan | scan_id={scan_id} | target={target_url} ===")
 
-        ch3_content = f"""
-        <table style="width:100%; border-collapse:collapse; border:1px solid #ECF0F1;">
-            <thead>
-                <tr style="background:#2C3E50; color:white;">
-                    <th style="padding:8px; text-align:left; font-size:11px;">Vulnerability</th>
-                    <th style="padding:8px; text-align:left; font-size:11px; width:50px;">CVSS</th>
-                    <th style="padding:8px; text-align:left; font-size:11px;">OWASP</th>
-                    <th style="padding:8px; text-align:left; font-size:11px;">Affected URL</th>
-                </tr>
-            </thead>
-            <tbody>{low_rows if low_rows else '<tr><td colspan="4" style="padding:12px; color:#27AE60; text-align:center;">✓ No Low severity vulnerabilities detected.</td></tr>'}</tbody>
-        </table>"""
+        result = {
+            "scan_id":  scan_id,
+            "target":   target_url,
+            "status":   "failed",
+            "findings": [],
+            "summary":  {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0},
+        }
 
-        # Chapter 4 — CVE / Tech findings
-        ch4_content = ""
-        if cve_findings:
-            for i, f in enumerate(cve_findings[:20]):
-                ch4_content += self._finding_block(f, i)
-        else:
-            ch4_content = '<p style="font-size:11px; color:#666; padding:12px; background:#F8F9FA;">No CVE findings detected. Technology fingerprinting found no software versions with known vulnerabilities.</p>'
+        parsed = urlparse(target_url)
+        hostname = parsed.hostname
+        findings = []
 
-        # Chapter 5 — Remediation checklist
-        checklist_rows = ""
-        priority_findings = [f for f in findings if f.get("severity") in ("Critical", "High", "Medium")][:25]
-        for i, f in enumerate(priority_findings):
-            text_color, bg_color = SEVERITY_COLORS.get(f.get("severity","Low"), ("#333","#eee"))
-            checklist_rows += f"""
-            <tr style="background:{'#FAFAFA' if i%2==0 else '#FFFFFF'};">
-                <td style="padding:8px; text-align:center; font-size:14px; border-bottom:1px solid #ECF0F1;">☐</td>
-                <td style="padding:8px; border-bottom:1px solid #ECF0F1;">
-                    <span style="background:{bg_color}; color:{text_color}; padding:1px 6px; font-size:10px; font-weight:700;">{f.get("severity","").upper()}</span>
-                </td>
-                <td style="padding:8px; font-size:11px; font-weight:600; border-bottom:1px solid #ECF0F1;">{f.get("vuln_type","")[:60]}</td>
-                <td style="padding:8px; font-size:10px; color:#666; border-bottom:1px solid #ECF0F1;">{f.get("affected_url","")[:50]}</td>
-                <td style="padding:8px; font-size:10px; color:#333; border-bottom:1px solid #ECF0F1;">{(f.get("recommendation") or f.get("solution",""))[:120]}{"..." if len(f.get("recommendation") or f.get("solution","")) > 120 else ""}</td>
-            </tr>"""
+        # ── HTTP-only check ──────────────────────────────
+        if parsed.scheme == "http":
+            findings.append(self._normalize_finding(
+                scan_id=scan_id,
+                vuln_type="HTTP Only Site",
+                owasp_category="A02:2021 - Cryptographic Failures",
+                cvss_score=5.9,
+                severity="Medium",
+                description="The site is served over HTTP without SSL/TLS encryption. All data transmitted between the browser and server is in plaintext and can be intercepted.",
+                solution="Configure your server to use HTTPS. Obtain a free TLS certificate from Let's Encrypt (certbot) and redirect all HTTP traffic to HTTPS.",
+                affected_url=target_url,
+                evidence="URL scheme is http://",
+                plugin_id="ssl_http_only",
+            ))
+            logger.info("Site uses HTTP only — no SSL/TLS")
 
-        html = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<style>
-    * {{ margin:0; padding:0; box-sizing:border-box; }}
-    body {{ font-family:Arial, sans-serif; color:#2C3E50; font-size:12px; }}
-    code {{ font-family:monospace; background:#F0F0F0; padding:1px 4px; font-size:10px; }}
-    .page-break {{ page-break-before:always; }}
-</style>
-</head>
-<body>
+            # Still check HSTS header even on HTTP
+            try:
+                resp = requests.get(target_url, timeout=self.timeout, verify=False)
+                if "strict-transport-security" not in {k.lower() for k in resp.headers}:
+                    findings.append(self._normalize_finding(
+                        scan_id=scan_id,
+                        vuln_type="Missing HSTS Header",
+                        owasp_category="A02:2021 - Cryptographic Failures",
+                        cvss_score=5.9,
+                        severity="Medium",
+                        description="HTTP Strict Transport Security (HSTS) header is not set. Browsers will not automatically enforce HTTPS connections.",
+                        solution="Add Strict-Transport-Security: max-age=31536000; includeSubDomains; preload to all HTTPS responses.",
+                        affected_url=target_url,
+                        plugin_id="ssl_missing_hsts",
+                    ))
+            except Exception:
+                pass
 
-<!-- ═══════════════════════════════════════════ -->
-<!-- COVER PAGE                                  -->
-<!-- ═══════════════════════════════════════════ -->
-<table style="width:100%; background:#1a1a2e; page-break-after:always; margin-bottom:0;">
-    <tr>
-        <td style="padding:60px 50px; color:white;">
-            <!-- Top bar -->
-            <table style="width:100%; margin-bottom:50px;">
-                <tr>
-                    <td style="color:#A8C6FA; font-size:12px; font-weight:700; letter-spacing:2px;">
-                        VULNERABILITY ASSESSMENT REPORT
-                    </td>
-                    <td style="text-align:right; color:#A8C6FA; font-size:11px;">
-                        Powered by OWASP ZAP + Groq AI
-                    </td>
-                </tr>
-            </table>
-
-            <!-- Risk badge -->
-            <div style="background:{risk_color}; display:inline-block; padding:6px 16px; margin-bottom:20px; font-size:12px; font-weight:700; letter-spacing:1px; color:white;">
-                {overall_risk}
-            </div>
-
-            <!-- Title -->
-            <div style="font-size:28px; font-weight:700; color:#FFFFFF; margin-bottom:8px; line-height:1.2;">
-                Website Security<br/>Assessment Report
-            </div>
-            <div style="font-size:14px; color:#A8C6FA; margin-bottom:50px;">
-                AI-Powered Vulnerability Detection &amp; Risk Analysis
-            </div>
-
-            <!-- Metadata box -->
-            <table style="width:100%; background:#2C3E6E; border-collapse:collapse;">
-                <tr>
-                    <td style="padding:12px 16px; color:#A8C6FA; font-size:11px; font-weight:700; width:160px; border-bottom:1px solid #3a4a7e;">TARGET URL</td>
-                    <td style="padding:12px 16px; color:#FFFFFF; font-size:11px; border-bottom:1px solid #3a4a7e;">{target_url}</td>
-                </tr>
-                <tr>
-                    <td style="padding:12px 16px; color:#A8C6FA; font-size:11px; font-weight:700; border-bottom:1px solid #3a4a7e;">SCAN DATE</td>
-                    <td style="padding:12px 16px; color:#FFFFFF; font-size:11px; border-bottom:1px solid #3a4a7e;">{date_str}</td>
-                </tr>
-                <tr>
-                    <td style="padding:12px 16px; color:#A8C6FA; font-size:11px; font-weight:700; border-bottom:1px solid #3a4a7e;">TOTAL FINDINGS</td>
-                    <td style="padding:12px 16px; color:#FFFFFF; font-size:11px; border-bottom:1px solid #3a4a7e;">{summary.get("total",0)} vulnerabilities identified</td>
-                </tr>
-                <tr>
-                    <td style="padding:12px 16px; color:#A8C6FA; font-size:11px; font-weight:700;">SCAN ID</td>
-                    <td style="padding:12px 16px; color:#888; font-size:10px;">{scan_id}</td>
-                </tr>
-            </table>
-
-            <!-- Severity summary -->
-            <table style="width:100%; margin-top:30px; border-collapse:collapse;">
-                <tr>
-                    <td style="background:#7B0000; padding:16px; text-align:center; width:20%;">
-                        <div style="color:white; font-size:28px; font-weight:700;">{summary.get("critical",0)}</div>
-                        <div style="color:#FFB3B3; font-size:10px; font-weight:700; letter-spacing:1px;">CRITICAL</div>
-                    </td>
-                    <td style="background:#C0392B; padding:16px; text-align:center; width:20%;">
-                        <div style="color:white; font-size:28px; font-weight:700;">{summary.get("high",0)}</div>
-                        <div style="color:#FFD0CC; font-size:10px; font-weight:700; letter-spacing:1px;">HIGH</div>
-                    </td>
-                    <td style="background:#E67E22; padding:16px; text-align:center; width:20%;">
-                        <div style="color:white; font-size:28px; font-weight:700;">{summary.get("medium",0)}</div>
-                        <div style="color:#FFE8CC; font-size:10px; font-weight:700; letter-spacing:1px;">MEDIUM</div>
-                    </td>
-                    <td style="background:#2980B9; padding:16px; text-align:center; width:20%;">
-                        <div style="color:white; font-size:28px; font-weight:700;">{summary.get("low",0)}</div>
-                        <div style="color:#CCE5FF; font-size:10px; font-weight:700; letter-spacing:1px;">LOW</div>
-                    </td>
-                    <td style="background:#2C3E50; padding:16px; text-align:center; width:20%;">
-                        <div style="color:white; font-size:28px; font-weight:700;">{summary.get("total",0)}</div>
-                        <div style="color:#BDC3C7; font-size:10px; font-weight:700; letter-spacing:1px;">TOTAL</div>
-                    </td>
-                </tr>
-            </table>
-        </td>
-    </tr>
-</table>
-
-<!-- ═══════════════════════════════════════════ -->
-<!-- EXECUTIVE SUMMARY                           -->
-<!-- ═══════════════════════════════════════════ -->
-<div style="padding:16px 40px;">
-    <table style="width:100%; border-collapse:collapse; margin-bottom:16px;">
-        <tr>
-            <td style="background:#1a1a2e; color:#A8C6FA; padding:5px 12px; font-size:10px; font-weight:700; width:180px;">EXECUTIVE SUMMARY</td>
-            <td style="background:#1a1a2e; color:#FFFFFF; padding:5px 16px; font-size:13px; font-weight:700;">Risk Overview &amp; Recommendations</td>
-        </tr>
-    </table>
-
-    <p style="font-size:11px; color:#444; line-height:1.6; margin-bottom:20px; padding:16px; background:#F8F9FA; border-left:4px solid #1a1a2e;">
-        {exec_summary}
-    </p>
-
-    <!-- OWASP Distribution -->
-    <table style="width:100%; border-collapse:collapse; margin-bottom:20px; border:1px solid #ECF0F1;">
-        <thead>
-            <tr style="background:#2C3E50; color:white;">
-                <th style="padding:8px 10px; text-align:left; font-size:11px;">OWASP Top 10 Category</th>
-                <th style="padding:8px 10px; text-align:center; font-size:11px; width:60px;">Count</th>
-                <th style="padding:8px 10px; font-size:11px;">Distribution</th>
-            </tr>
-        </thead>
-        <tbody>{owasp_rows}</tbody>
-    </table>
-
-    <!-- Table of contents -->
-    <table style="width:100%; border-collapse:collapse; border:1px solid #ECF0F1;">
-        <thead>
-            <tr style="background:#2C3E50; color:white;">
-                <th colspan="2" style="padding:8px 12px; text-align:left; font-size:11px;">REPORT CHAPTERS</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr style="background:#FDECEA;">
-                <td style="padding:8px 12px; font-size:11px; font-weight:700; width:120px; border-bottom:1px solid #ECF0F1;">Chapter 1</td>
-                <td style="padding:8px 12px; font-size:11px; border-bottom:1px solid #ECF0F1;">Critical &amp; High Priority Vulnerabilities ({len(critical_high)} findings) — <strong>Address Immediately</strong></td>
-            </tr>
-            <tr style="background:#FEF3E2;">
-                <td style="padding:8px 12px; font-size:11px; font-weight:700; border-bottom:1px solid #ECF0F1;">Chapter 2</td>
-                <td style="padding:8px 12px; font-size:11px; border-bottom:1px solid #ECF0F1;">Medium Severity Vulnerabilities ({len(medium)} findings) — Address in Next Sprint</td>
-            </tr>
-            <tr style="background:#EBF5FB;">
-                <td style="padding:8px 12px; font-size:11px; font-weight:700; border-bottom:1px solid #ECF0F1;">Chapter 3</td>
-                <td style="padding:8px 12px; font-size:11px; border-bottom:1px solid #ECF0F1;">Low Severity Vulnerabilities ({len(low)} findings) — Address When Feasible</td>
-            </tr>
-            <tr>
-                <td style="padding:8px 12px; font-size:11px; font-weight:700; border-bottom:1px solid #ECF0F1;">Chapter 4</td>
-                <td style="padding:8px 12px; font-size:11px; border-bottom:1px solid #ECF0F1;">Technology &amp; CVE Findings ({len(cve_findings)} findings)</td>
-            </tr>
-            <tr style="background:#FAFAFA;">
-                <td style="padding:8px 12px; font-size:11px; font-weight:700;">Chapter 5</td>
-                <td style="padding:8px 12px; font-size:11px;">Remediation Checklist — Prioritized Action Items</td>
-            </tr>
-        </tbody>
-    </table>
-
-    <p style="font-size:10px; color:#999; margin-top:16px; text-align:center;">
-        ⚠ This report is generated by an automated scanner. Results should be reviewed by a qualified security professional before remediation actions are taken. This tool does not replace a professional penetration test.
-    </p>
-</div>
-
-<!-- ═══════════════════════════════════════════ -->
-<!-- CHAPTER 1: CRITICAL & HIGH                  -->
-<!-- ═══════════════════════════════════════════ -->
-<div style="padding:8px 40px;">
-    {self._chapter_header("1", "Critical &amp; High Priority Vulnerabilities",
-        "The following vulnerabilities represent the highest risk to your organization and should be addressed immediately. "
-        "These findings have been confirmed by automated scanning engines and enriched with AI-generated remediation guidance.")}
-    {ch1_content}
-</div>
-
-<!-- ═══════════════════════════════════════════ -->
-<!-- CHAPTER 2: MEDIUM                           -->
-<!-- ═══════════════════════════════════════════ -->
-<div style="padding:8px 40px;">
-    {self._chapter_header("2", "Medium Severity Vulnerabilities",
-        "Medium severity findings represent meaningful security weaknesses that should be addressed in the next development cycle. "
-        "While not immediately exploitable in most cases, these issues can be chained with other vulnerabilities to enable attacks.")}
-    {ch2_content}
-</div>
-
-<!-- ═══════════════════════════════════════════ -->
-<!-- CHAPTER 3: LOW                              -->
-<!-- ═══════════════════════════════════════════ -->
-<div style="padding:8px 40px;">
-    {self._chapter_header("3", "Low Severity Vulnerabilities",
-        "Low severity findings are security improvements that, while not immediately critical, represent security best practice gaps. "
-        "These should be addressed as part of regular security hygiene and hardening activities.")}
-    {ch3_content}
-</div>
-
-<!-- ═══════════════════════════════════════════ -->
-<!-- CHAPTER 4: CVE & TECH                       -->
-<!-- ═══════════════════════════════════════════ -->
-<div style="padding:8px 40px;">
-    {self._chapter_header("4", "Technology &amp; CVE Findings",
-        "The following findings were identified through technology fingerprinting and cross-referenced against the NVD (National Vulnerability Database). "
-        "Known CVEs in detected software versions represent concrete, publicly documented exploitation paths.")}
-    {ch4_content}
-</div>
-
-<!-- ═══════════════════════════════════════════ -->
-<!-- CHAPTER 5: REMEDIATION CHECKLIST            -->
-<!-- ═══════════════════════════════════════════ -->
-<div style="padding:8px 40px;">
-    {self._chapter_header("5", "Remediation Checklist",
-        "Use this checklist to track remediation progress. Items are ordered by severity — address Critical and High findings first. "
-        "Check off each item as it is resolved and re-scan to verify.")}
-    <table style="width:100%; border-collapse:collapse; border:1px solid #ECF0F1;">
-        <thead>
-            <tr style="background:#1a1a2e; color:white;">
-                <th style="padding:8px; width:30px; font-size:11px;">✓</th>
-                <th style="padding:8px; width:70px; font-size:11px;">Severity</th>
-                <th style="padding:8px; font-size:11px;">Vulnerability</th>
-                <th style="padding:8px; font-size:11px; width:140px;">Affected URL</th>
-                <th style="padding:8px; font-size:11px;">Recommended Fix</th>
-            </tr>
-        </thead>
-        <tbody>
-            {checklist_rows if checklist_rows else '<tr><td colspan="5" style="padding:12px; text-align:center; color:#27AE60;">✓ No high-priority items to remediate.</td></tr>'}
-        </tbody>
-    </table>
-</div>
-
-<!-- ═══════════════════════════════════════════ -->
-<!-- APPENDIX: METHODOLOGY                       -->
-<!-- ═══════════════════════════════════════════ -->
-<div style="padding:8px 40px;">
-    <table style="width:100%; border-collapse:collapse; margin-bottom:16px;">
-        <tr>
-            <td style="background:#2C3E50; color:#BDC3C7; padding:5px 12px; font-size:10px; font-weight:700; width:100px;">APPENDIX</td>
-            <td style="background:#2C3E50; color:#FFFFFF; padding:5px 16px; font-size:13px; font-weight:700;">Scan Methodology &amp; Tool Information</td>
-        </tr>
-    </table>
-
-    <table style="width:100%; border-collapse:collapse; margin-bottom:16px; border:1px solid #ECF0F1;">
-        <thead>
-            <tr style="background:#ECF0F1;">
-                <th style="padding:8px 12px; text-align:left; font-size:11px; font-weight:700;">Scanning Module</th>
-                <th style="padding:8px 12px; text-align:left; font-size:11px; font-weight:700;">Purpose</th>
-                <th style="padding:8px 12px; text-align:left; font-size:11px; font-weight:700;">Detection Type</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr style="border-bottom:1px solid #ECF0F1;">
-                <td style="padding:8px 12px; font-size:11px; font-weight:600;">OWASP ZAP</td>
-                <td style="padding:8px 12px; font-size:11px;">SQLi, XSS, CSRF, Path Traversal, Misconfigurations</td>
-                <td style="padding:8px 12px; font-size:11px;">Active (payload injection)</td>
-            </tr>
-            <tr style="background:#FAFAFA; border-bottom:1px solid #ECF0F1;">
-                <td style="padding:8px 12px; font-size:11px; font-weight:600;">Nuclei</td>
-                <td style="padding:8px 12px; font-size:11px;">Known CVEs, exposed files, default credentials</td>
-                <td style="padding:8px 12px; font-size:11px;">Template-based</td>
-            </tr>
-            <tr style="border-bottom:1px solid #ECF0F1;">
-                <td style="padding:8px 12px; font-size:11px; font-weight:600;">Header Scanner</td>
-                <td style="padding:8px 12px; font-size:11px;">Missing security headers (CSP, HSTS, X-Frame-Options)</td>
-                <td style="padding:8px 12px; font-size:11px;">Passive</td>
-            </tr>
-            <tr style="background:#FAFAFA; border-bottom:1px solid #ECF0F1;">
-                <td style="padding:8px 12px; font-size:11px; font-weight:600;">SSL/TLS Scanner</td>
-                <td style="padding:8px 12px; font-size:11px;">Certificate validity, protocol versions, cipher suites</td>
-                <td style="padding:8px 12px; font-size:11px;">Passive</td>
-            </tr>
-            <tr style="border-bottom:1px solid #ECF0F1;">
-                <td style="padding:8px 12px; font-size:11px; font-weight:600;">Tech Fingerprinter</td>
-                <td style="padding:8px 12px; font-size:11px;">Web server, CMS, framework, JS library detection</td>
-                <td style="padding:8px 12px; font-size:11px;">Passive</td>
-            </tr>
-            <tr style="background:#FAFAFA;">
-                <td style="padding:8px 12px; font-size:11px; font-weight:600;">NVD CVE Lookup</td>
-                <td style="padding:8px 12px; font-size:11px;">Cross-reference detected versions against NVD database</td>
-                <td style="padding:8px 12px; font-size:11px;">Intelligence</td>
-            </tr>
-        </tbody>
-    </table>
-
-    <table style="width:100%; border-collapse:collapse; border:1px solid #ECF0F1;">
-        <thead>
-            <tr style="background:#ECF0F1;">
-                <th colspan="2" style="padding:8px 12px; text-align:left; font-size:11px; font-weight:700;">Severity Classification (CVSS v3.1)</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr style="border-bottom:1px solid #ECF0F1;">
-                <td style="padding:6px 12px;"><span style="background:#FFE5E5; color:#7B0000; padding:2px 8px; font-weight:700; font-size:10px;">CRITICAL</span></td>
-                <td style="padding:6px 12px; font-size:11px;">CVSS 9.0–10.0 — Requires immediate remediation</td>
-            </tr>
-            <tr style="background:#FAFAFA; border-bottom:1px solid #ECF0F1;">
-                <td style="padding:6px 12px;"><span style="background:#FDECEA; color:#C0392B; padding:2px 8px; font-weight:700; font-size:10px;">HIGH</span></td>
-                <td style="padding:6px 12px; font-size:11px;">CVSS 7.0–8.9 — Address within 30 days</td>
-            </tr>
-            <tr style="border-bottom:1px solid #ECF0F1;">
-                <td style="padding:6px 12px;"><span style="background:#FEF3E2; color:#E67E22; padding:2px 8px; font-weight:700; font-size:10px;">MEDIUM</span></td>
-                <td style="padding:6px 12px; font-size:11px;">CVSS 4.0–6.9 — Address within 90 days</td>
-            </tr>
-            <tr style="background:#FAFAFA;">
-                <td style="padding:6px 12px;"><span style="background:#EBF5FB; color:#2980B9; padding:2px 8px; font-weight:700; font-size:10px;">LOW</span></td>
-                <td style="padding:6px 12px; font-size:11px;">CVSS 0.1–3.9 — Address during regular maintenance</td>
-            </tr>
-        </tbody>
-    </table>
-
-    <p style="font-size:10px; color:#999; margin-top:20px; text-align:center; border-top:1px solid #ECF0F1; padding-top:12px;">
-        AI-Powered Vulnerability Assessment Tool &nbsp;|&nbsp; Powered by OWASP ZAP + Nuclei + Groq AI (Llama 3.3 70B) &nbsp;|&nbsp; Generated: {date_str}
-        <br/>Scan ID: {scan_id}
-    </p>
-</div>
-
-</body>
-</html>"""
-        return html
-
-    def generate(self, scan_data: dict, output_filename: str = None) -> str:
-        try:
-            from xhtml2pdf import pisa
-        except ImportError:
-            raise ImportError("xhtml2pdf not installed. Run: pip install xhtml2pdf")
-
-        # Patch missing fields
-        if not scan_data.get("scan_id") and scan_data.get("findings"):
-            scan_data["scan_id"] = scan_data["findings"][0].get("scan_id", "unknown")
-        if not scan_data.get("url") and scan_data.get("target"):
-            scan_data["url"] = scan_data["target"]
-        if "summary" not in scan_data:
-            findings = scan_data.get("findings", [])
+            # Build summary and return early — no SSL cert to check on HTTP
             summary = {"total": len(findings), "critical": 0, "high": 0, "medium": 0, "low": 0}
             for f in findings:
-                sev = f.get("severity", "Low").lower()
+                sev = f["severity"].lower()
                 if sev in summary:
                     summary[sev] += 1
-            scan_data["summary"] = summary
+            result["status"]    = "completed"
+            result["findings"]  = findings
+            result["summary"]   = summary
+            result["tls_grade"] = "F"  # no TLS in use at all
+            logger.info(f"=== SSL scan complete (HTTP site) | {summary} | tls_grade=F ===")
+            return result
 
-        scan_id = scan_data.get("scan_id", "unknown")
-        if output_filename is None:
-            output_filename = f"report_{scan_id}.pdf"
+        # ── HTTPS site — full SSL checks ─────────────────
+        port = parsed.port or 443
+        cert_info = self._get_certificate_info(hostname, port)
 
-        output_path = self.output_dir / output_filename
-        logger.info(f"Generating Tenable-style PDF for scan {scan_id}")
+        # Flags used later to compute the overall tls_grade
+        cert_error_flag = False
+        cert_expired_flag = False
+        cert_expiring_soon_flag = False
+        hsts_missing_flag = False
+        cert_details = {}
 
-        html_content = self._build_html(scan_data)
+        if cert_info["error"]:
+            cert_error_flag = True
+            findings.append(self._normalize_finding(
+                scan_id=scan_id,
+                vuln_type="SSL Certificate Error",
+                owasp_category="A02:2021 - Cryptographic Failures",
+                cvss_score=7.4,
+                severity="High",
+                description=f"SSL certificate validation failed: {cert_info['error']}",
+                solution="Ensure the server has a valid, properly configured SSL certificate from a trusted Certificate Authority.",
+                affected_url=target_url,
+                evidence=cert_info["error"],
+                plugin_id="ssl_cert_error",
+            ))
+        else:
+            cert = cert_info["cert"]
 
-        with open(str(output_path), "wb") as pdf_file:
-            pisa.CreatePDF(html_content, dest=pdf_file)
+            # Certificate details: issuer, subject, validity window,
+            # negotiated protocol/cipher — surfaced in result["tls_details"]
+            cert_details = self._extract_cert_details(
+                cert, cert_info["protocol"], cert_info["cipher"]
+            )
 
-        logger.info(f"PDF saved to: {output_path}")
-        return str(output_path)
+            # Check certificate expiry
+            if cert:
+                try:
+                    not_after_str = cert.get("notAfter", "")
+                    not_after = datetime.strptime(not_after_str, "%b %d %H:%M:%S %Y %Z")
+                    not_after = not_after.replace(tzinfo=timezone.utc)
+                    now = datetime.now(timezone.utc)
+                    days_remaining = (not_after - now).days
+
+                    if days_remaining < 0:
+                        cert_expired_flag = True
+                        findings.append(self._normalize_finding(
+                            scan_id=scan_id,
+                            vuln_type="Expired SSL Certificate",
+                            owasp_category="A02:2021 - Cryptographic Failures",
+                            cvss_score=7.4,
+                            severity="High",
+                            description=f"The SSL certificate expired on {not_after_str}. Browsers will show security warnings and block access.",
+                            solution="Renew your SSL certificate immediately. Use Let's Encrypt with auto-renewal to prevent future expiry.",
+                            affected_url=target_url,
+                            evidence=f"Certificate expired: {not_after_str}",
+                            plugin_id="ssl_cert_expired",
+                        ))
+                    elif days_remaining < 30:
+                        cert_expiring_soon_flag = True
+                        findings.append(self._normalize_finding(
+                            scan_id=scan_id,
+                            vuln_type="SSL Certificate Expiring Soon",
+                            owasp_category="A02:2021 - Cryptographic Failures",
+                            cvss_score=5.3,
+                            severity="Medium",
+                            description=f"The SSL certificate expires in {days_remaining} days on {not_after_str}.",
+                            solution="Renew your SSL certificate before it expires. Enable auto-renewal if using Let's Encrypt.",
+                            affected_url=target_url,
+                            evidence=f"Certificate expires in {days_remaining} days: {not_after_str}",
+                            plugin_id="ssl_cert_expiring",
+                        ))
+                except Exception as e:
+                    logger.warning(f"Could not parse certificate expiry: {e}")
+
+            # Check weak protocol
+            weak = self._check_weak_protocols(hostname, port)
+            for proto in weak:
+                findings.append(self._normalize_finding(
+                    scan_id=scan_id,
+                    vuln_type=f"Weak TLS Protocol Supported ({proto})",
+                    owasp_category="A02:2021 - Cryptographic Failures",
+                    cvss_score=5.9,
+                    severity="Medium",
+                    description=f"The server accepts {proto} connections which are considered cryptographically weak and vulnerable to known attacks.",
+                    solution=f"Disable {proto} in your server configuration. For Nginx: ssl_protocols TLSv1.2 TLSv1.3; For Apache: SSLProtocol all -SSLv3 -TLSv1 -TLSv1.1",
+                    affected_url=target_url,
+                    evidence=f"Server accepted {proto} handshake",
+                    plugin_id=f"ssl_weak_protocol_{proto.lower().replace('.', '_')}",
+                ))
+
+            # Check weak cipher suites (RC4, DES, 3DES, NULL, EXPORT)
+            weak_ciphers = self._check_cipher_suites(hostname, port)
+            for family, is_accepted in weak_ciphers.items():
+                if is_accepted:
+                    findings.append(self._normalize_finding(
+                        scan_id=scan_id,
+                        vuln_type=f"Weak Cipher Suite Supported ({family})",
+                        owasp_category="A02:2021 - Cryptographic Failures",
+                        cvss_score=7.4 if family in ("NULL", "EXPORT") else 5.9,
+                        severity="High" if family in ("NULL", "EXPORT") else "Medium",
+                        description=f"The server accepts {family} cipher suites, which are cryptographically weak, deprecated, and vulnerable to known attacks (e.g. decryption or downgrade).",
+                        solution=f"Disable {family}-based cipher suites in your server configuration. For Nginx: ssl_ciphers 'HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!3DES:!MD5:!PSK'; For Apache: SSLCipherSuite HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!3DES:!MD5:!PSK",
+                        affected_url=target_url,
+                        evidence=f"Server negotiated a connection using a {family} cipher",
+                        plugin_id=f"ssl_weak_cipher_{family.lower()}",
+                    ))
+
+            # Explicitly validate modern protocol support (TLS 1.2 / 1.3)
+            protocol_support = self._check_protocol_support(hostname, port)
+            if not protocol_support["TLSv1.2"] and not protocol_support["TLSv1.3"]:
+                findings.append(self._normalize_finding(
+                    scan_id=scan_id,
+                    vuln_type="No Modern TLS Protocol Supported",
+                    owasp_category="A02:2021 - Cryptographic Failures",
+                    cvss_score=8.2,
+                    severity="High",
+                    description="The server does not support TLS 1.2 or TLS 1.3. Only outdated, cryptographically weak protocol versions are available.",
+                    solution="Enable TLS 1.2 and TLS 1.3 support in your server configuration. For Nginx: ssl_protocols TLSv1.2 TLSv1.3; For Apache: SSLProtocol -all +TLSv1.2 +TLSv1.3",
+                    affected_url=target_url,
+                    evidence=f"Protocol support: {protocol_support}",
+                    plugin_id="ssl_no_modern_tls",
+                ))
+            elif not protocol_support["TLSv1.3"]:
+                findings.append(self._normalize_finding(
+                    scan_id=scan_id,
+                    vuln_type="TLS 1.3 Not Supported",
+                    owasp_category="A02:2021 - Cryptographic Failures",
+                    cvss_score=3.1,
+                    severity="Low",
+                    description="The server supports TLS 1.2 but not TLS 1.3. TLS 1.3 offers improved performance and removes several legacy cryptographic weaknesses present in 1.2.",
+                    solution="Enable TLS 1.3 alongside TLS 1.2. For Nginx: ssl_protocols TLSv1.2 TLSv1.3; For Apache 2.4.37+: SSLProtocol -all +TLSv1.2 +TLSv1.3",
+                    affected_url=target_url,
+                    evidence=f"Protocol support: {protocol_support}",
+                    plugin_id="ssl_no_tls13",
+                ))
+
+            # Check HSTS
+            try:
+                resp = requests.get(target_url, timeout=self.timeout, verify=False)
+                if "strict-transport-security" not in {k.lower() for k in resp.headers}:
+                    hsts_missing_flag = True
+                    findings.append(self._normalize_finding(
+                        scan_id=scan_id,
+                        vuln_type="Missing HSTS Header",
+                        owasp_category="A02:2021 - Cryptographic Failures",
+                        cvss_score=5.9,
+                        severity="Medium",
+                        description="HTTP Strict Transport Security (HSTS) header is not set. Users may be vulnerable to SSL stripping attacks.",
+                        solution="Add Strict-Transport-Security: max-age=31536000; includeSubDomains; preload to all HTTPS responses.",
+                        affected_url=target_url,
+                        plugin_id="ssl_missing_hsts",
+                    ))
+            except Exception:
+                pass
+
+        # Compute the overall TLS grade from everything gathered above.
+        # weak_ciphers / protocol_support only exist if we made it past the
+        # cert_info["error"] branch — default them so grading still works.
+        weak_ciphers = weak_ciphers if "weak_ciphers" in locals() else {}
+        protocol_support = protocol_support if "protocol_support" in locals() else {"TLSv1.2": False, "TLSv1.3": False}
+        weak_protocol_list = weak if "weak" in locals() else []
+
+        tls_grade = self._calculate_tls_grade(
+            cert_error=cert_error_flag,
+            cert_expired=cert_expired_flag,
+            cert_expiring_soon=cert_expiring_soon_flag,
+            weak_protocols=weak_protocol_list,
+            weak_ciphers=weak_ciphers,
+            protocol_support=protocol_support,
+            hsts_missing=hsts_missing_flag,
+        )
+
+        # Build summary
+        summary = {"total": len(findings), "critical": 0, "high": 0, "medium": 0, "low": 0}
+        for f in findings:
+            sev = f["severity"].lower()
+            if sev in summary:
+                summary[sev] += 1
+
+        result["status"]     = "completed"
+        result["findings"]   = findings
+        result["summary"]    = summary
+        result["tls_grade"]  = tls_grade
+        result["tls_details"] = cert_details
+
+        logger.info(f"=== SSL scan complete | {summary} | tls_grade={tls_grade} ===")
+        return result
 
 
-# ── Quick test ──────────────────────────────────
+# ──────────────────────────────────────────────
+# Quick test
+# ──────────────────────────────────────────────
 if __name__ == "__main__":
-    import sys
-    logging.basicConfig(level=logging.INFO)
+    import json
 
-    for fname in ["scan_result_enriched.json", "scan_result.json"]:
-        if os.path.exists(fname):
-            with open(fname) as f:
-                raw = json.load(f)
-            print(f"Loaded from {fname}")
-            break
-    else:
-        print("No scan data found.")
-        sys.exit(1)
+    scanner = SSLScanner()
 
-    gen = PDFGenerator(output_dir="reports/output")
-    path = gen.generate(raw)
-    print(f"\nPDF generated: {path}")
+    # Test HTTP site (DVWA)
+    result = scanner.run_scan("http://host.docker.internal:8888")
+
+    print(f"\nStatus  : {result['status']}")
+    print(f"Summary : {result['summary']}")
+    print(f"\nFindings:")
+    for f in result["findings"]:
+        print(f"  [{f['severity']}] {f['vuln_type']}")
+        print(f"    OWASP : {f['owasp_category']}")
+        print(f"    Fix   : {f['recommendation'][:80]}...")
+
+    with open("ssl_scan_result.json", "w") as fp:
+        json.dump(result, fp, indent=2)
+    print("\nSaved to ssl_scan_result.json")
