@@ -200,6 +200,58 @@ class SSLScanner:
             "negotiated_cipher":   cipher[0] if cipher else None,
         }
 
+    def _check_cbc_only_configuration(self, hostname: str, port: int = 443, tls13_supported: bool = False) -> dict:
+        """
+        Determine whether the server is running a legacy, CBC-only cipher
+        configuration — i.e. it accepts CBC-mode suites at TLS 1.2 but does
+        NOT offer any AEAD suite (GCM/ChaCha20) and does not support TLS 1.3.
+
+        This is deliberately narrower than "does the server accept CBC at
+        all" — CBC suites are still common and not a vulnerability on their
+        own when AEAD is also available and preferred. Flagging every CBC
+        acceptance would produce noise on the majority of correctly
+        configured servers. The condition that actually matters for
+        padding-oracle-style attacks (Lucky13, and SWEET32 for 3DES) is a
+        server that has NO modern alternative to fall back to.
+
+        Returns:
+            {
+              "cbc_accepted":  bool,  # server accepted a CBC-only handshake
+              "aead_accepted": bool,  # server accepted a GCM/ChaCha20-only handshake
+              "cbc_only":      bool,  # cbc_accepted AND NOT aead_accepted AND NOT tls13_supported
+            }
+        """
+        # AEAD (authenticated encryption) suites — the modern, non-padding-oracle alternative
+        aead_ciphers = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305"
+        # Legacy CBC-mode suites (excludes 3DES/RC4/NULL/EXPORT — those are already
+        # covered separately by _check_cipher_suites; this isolates plain AES-CBC).
+        cbc_ciphers = "ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA:AES128-SHA:AES256-SHA:AES128-SHA256:AES256-SHA256"
+
+        def _probe(cipher_string: str) -> bool:
+            try:
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                context.minimum_version = ssl.TLSVersion.TLSv1_2
+                context.maximum_version = ssl.TLSVersion.TLSv1_2
+                context.set_ciphers(f"{cipher_string}:@SECLEVEL=0")
+                with socket.create_connection((hostname, port), timeout=self.timeout) as sock:
+                    with context.wrap_socket(sock, server_hostname=hostname) as ssock:
+                        return ssock.cipher() is not None
+            except (ssl.SSLError, OSError):
+                return False
+            except Exception:
+                return False
+
+        cbc_accepted = _probe(cbc_ciphers)
+        aead_accepted = _probe(aead_ciphers)
+        cbc_only = cbc_accepted and not aead_accepted and not tls13_supported
+
+        if cbc_only:
+            logger.warning("Server accepts CBC-mode ciphers with no AEAD/TLS1.3 fallback")
+
+        return {"cbc_accepted": cbc_accepted, "aead_accepted": aead_accepted, "cbc_only": cbc_only}
+
     def _calculate_tls_grade(
         self,
         cert_error: bool,
@@ -209,6 +261,7 @@ class SSLScanner:
         weak_ciphers: dict,
         protocol_support: dict,
         hsts_missing: bool,
+        cbc_only: bool = False,
     ) -> str:
         """
         Derive an A-F letter grade from the individual check results.
@@ -227,6 +280,8 @@ class SSLScanner:
             score -= 40  # server doesn't speak any modern TLS version
         elif not protocol_support.get("TLSv1.3"):
             score -= 5  # TLS 1.2 only — acceptable but not best practice
+        if cbc_only:
+            score -= 15  # no AEAD fallback — vulnerable to padding-oracle-style attacks
         if cert_expiring_soon:
             score -= 10
         if hsts_missing:
@@ -492,6 +547,26 @@ class SSLScanner:
                     plugin_id="ssl_no_tls13",
                 ))
 
+            # Check for a CBC-only cipher configuration (no AEAD fallback).
+            # Deliberately scoped narrowly — see _check_cbc_only_configuration
+            # docstring for why "CBC accepted" alone is not flagged.
+            cbc_result = self._check_cbc_only_configuration(
+                hostname, port, tls13_supported=protocol_support.get("TLSv1.3", False)
+            )
+            if cbc_result["cbc_only"]:
+                findings.append(self._normalize_finding(
+                    scan_id=scan_id,
+                    vuln_type="Weak CBC Cipher Suite Supported",
+                    owasp_category="A02:2021 - Cryptographic Failures",
+                    cvss_score=5.9,
+                    severity="Medium",
+                    description="The server relies exclusively on CBC-mode cipher suites at TLS 1.2, with no AEAD suite (GCM/ChaCha20) available and no TLS 1.3 fallback. CBC-mode suites in this configuration are susceptible to padding-oracle-style attacks (e.g. Lucky13).",
+                    solution="Prioritize AEAD cipher suites (AES-GCM, ChaCha20-Poly1305) ahead of CBC-mode suites, or enable TLS 1.3. For Nginx: ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384'; ssl_prefer_server_ciphers on;",
+                    affected_url=target_url,
+                    evidence="Server accepted a CBC-only TLS 1.2 handshake; no AEAD suite or TLS 1.3 support detected",
+                    plugin_id="ssl_cbc_only",
+                ))
+
             # Check HSTS
             try:
                 resp = requests.get(target_url, timeout=self.timeout, verify=False)
@@ -512,11 +587,12 @@ class SSLScanner:
                 pass
 
         # Compute the overall TLS grade from everything gathered above.
-        # weak_ciphers / protocol_support only exist if we made it past the
-        # cert_info["error"] branch — default them so grading still works.
+        # weak_ciphers / protocol_support / cbc_result only exist if we made
+        # it past the cert_info["error"] branch — default them so grading still works.
         weak_ciphers = weak_ciphers if "weak_ciphers" in locals() else {}
         protocol_support = protocol_support if "protocol_support" in locals() else {"TLSv1.2": False, "TLSv1.3": False}
         weak_protocol_list = weak if "weak" in locals() else []
+        cbc_result = cbc_result if "cbc_result" in locals() else {"cbc_accepted": False, "aead_accepted": False, "cbc_only": False}
 
         tls_grade = self._calculate_tls_grade(
             cert_error=cert_error_flag,
@@ -526,6 +602,7 @@ class SSLScanner:
             weak_ciphers=weak_ciphers,
             protocol_support=protocol_support,
             hsts_missing=hsts_missing_flag,
+            cbc_only=cbc_result["cbc_only"],
         )
 
         # Build summary
