@@ -1,7 +1,7 @@
 """
 Excel Report Generator
 ======================
-Generates a professional vulnerability assessment Excel workbook
+Generates professional vulnerability assessment Excel workbook
 from enriched scan findings using OpenPyXL.
 
 Workbook structure:
